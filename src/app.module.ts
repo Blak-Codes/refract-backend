@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { ScheduleModule } from "@nestjs/schedule";
 import configuration from "./config/configuration";
+import { DatabaseModule } from "./db/database.module";
+import { IdempotencyModule } from "./common/idempotency.module";
 import { HealthModule } from "./health/health.module";
 import { QuoteModule } from "./quote/quote.module";
 import { PolicyModule } from "./policy/policy.module";
@@ -17,6 +19,8 @@ import { TxModule } from "./tx/tx.module";
       load: [configuration],
     }),
     ScheduleModule.forRoot(),
+    DatabaseModule,
+    IdempotencyModule,
     HealthModule,
     QuoteModule,
     PolicyModule,

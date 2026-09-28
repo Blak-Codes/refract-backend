@@ -1,9 +1,10 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { OracleReading } from "../oracle/oracle-reading";
 import { OracleService } from "../oracle/oracle.service";
 import { PolicyService, StoredPolicy } from "../policy/policy.service";
 import { ClaimSettlementService } from "./claim-settlement.service";
 import { ClaimResult } from "./claim-result";
+import { ReconciliationService } from "./reconciliation.service";
 
 const STALENESS_LIMIT_SECONDS = 1800; // 30 minutes — matches the old ClaimProcessor
 
@@ -34,7 +35,9 @@ export class ClaimService {
   constructor(
     private readonly policyService: PolicyService,
     private readonly oracleService: OracleService,
-    private readonly claimSettlementService: ClaimSettlementService
+    private readonly claimSettlementService: ClaimSettlementService,
+    @Inject(forwardRef(() => ReconciliationService))
+    private readonly reconciliationService: ReconciliationService
   ) {}
 
   async processTriggered(): Promise<ClaimResult[]> {
@@ -122,6 +125,9 @@ export class ClaimService {
     const settlement = await this.claimSettlementService.settleClaim(policy.id, policy.holder, BigInt(result.payout));
     if (!settlement.settled) {
       this.logger.error(`Settlement did not confirm for policy ${policy.id}, will retry next scan: ${settlement.error}`);
+      // Notify the reconciliation service so it can track stuck-settlement
+      // drift and alert once the retry count exceeds the cap.
+      this.reconciliationService.recordFailedSettlement(policy.id);
       return undefined;
     }
 

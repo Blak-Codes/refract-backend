@@ -1,10 +1,28 @@
-import { Controller, Get, NotFoundException, Param, Post, Body } from "@nestjs/common";
+import {
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Post,
+  Body,
+  Res,
+} from "@nestjs/common";
+import { Response } from "express";
 import { BuyPolicyDto } from "./dto/buy-policy.dto";
 import { PolicyService } from "./policy.service";
+import { IdempotencyService } from "../common/idempotency.service";
+
+const ENDPOINT = "POST /api/v1/policies/buy";
 
 @Controller("api/v1/policies")
 export class PolicyController {
-  constructor(private readonly policyService: PolicyService) {}
+  constructor(
+    private readonly policyService: PolicyService,
+    private readonly idempotency: IdempotencyService
+  ) {}
 
   @Get("types")
   listTypes() {
@@ -40,8 +58,44 @@ export class PolicyController {
     return { policy };
   }
 
+  /**
+   * Idempotent policy purchase.
+   *
+   * Pass an `Idempotency-Key` header (e.g. a UUID generated client-side)
+   * to make the endpoint safe to retry.  Retries with the same key return
+   * the original response without creating a second policy or firing a
+   * second Soroban simulation.
+   *
+   * If no key is supplied the request is processed once without any
+   * deduplication guarantee (existing behaviour, preserved for backward
+   * compatibility).
+   */
   @Post("buy")
-  buy(@Body() dto: BuyPolicyDto) {
-    return this.policyService.buy(dto);
+  @HttpCode(HttpStatus.CREATED)
+  async buy(
+    @Body() dto: BuyPolicyDto,
+    @Headers("idempotency-key") idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    if (!idempotencyKey) {
+      return this.policyService.buy(dto);
+    }
+
+    const check = await this.idempotency.acquire(idempotencyKey, ENDPOINT);
+    if (check.hit) {
+      res.status(check.record.statusCode);
+      return check.record.responseBody;
+    }
+
+    try {
+      const result = await this.policyService.buy(dto);
+      await this.idempotency.commit(idempotencyKey, ENDPOINT, result, HttpStatus.CREATED);
+      return result;
+    } catch (err) {
+      // Don't cache errors that are client-fixable (bad request, etc.) —
+      // release the lock so the client can retry with the corrected payload.
+      await this.idempotency.release(idempotencyKey, ENDPOINT);
+      throw err;
+    }
   }
 }

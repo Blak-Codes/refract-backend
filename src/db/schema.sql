@@ -65,17 +65,25 @@ CREATE INDEX idx_claims_holder ON claims(holder);
 CREATE INDEX idx_claims_policy ON claims(policy_id);
 
 -- ─── Oracle Events ───────────────────────────────────────────────────────────
+-- Declared as a range-partitioned table (monthly buckets on recorded_at).
+-- The initial partitions are created by src/db/migrations/001_idempotency_and_oracle_partitioning.sql,
+-- and OracleRetentionService (src/oracle/oracle-retention.service.ts) creates
+-- future partitions nightly and prunes partitions outside the retention window
+-- (default: 6 months, tunable via DB_ORACLE_RETENTION_MONTHS).
 
 CREATE TABLE oracle_events (
-  id              BIGSERIAL       PRIMARY KEY,
+  id              BIGSERIAL,
   coverage_type   coverage_type   NOT NULL,
   value           NUMERIC(20, 6)  NOT NULL,
   source          VARCHAR(40)     NOT NULL,
   severity        VARCHAR(10)     NOT NULL,  -- low | medium | high | triggered
-  recorded_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
+  recorded_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (id, recorded_at)              -- partition key must be in PK
+) PARTITION BY RANGE (recorded_at);
 
-CREATE INDEX idx_oracle_type ON oracle_events(coverage_type, recorded_at DESC);
+-- NOTE: run src/db/migrations/001_idempotency_and_oracle_partitioning.sql to
+-- create the initial monthly partitions.  The schema above only defines the
+-- parent table.
 
 -- ─── LP Positions ────────────────────────────────────────────────────────────
 
@@ -98,3 +106,22 @@ CREATE TABLE premium_revenue (
   coverage_type   coverage_type   NOT NULL,
   collected_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
+
+-- ─── Idempotency Keys ────────────────────────────────────────────────────────
+-- Durable store for idempotency locks and committed responses.
+-- Applied to POST /policies/buy, POST /pool/provide, POST /pool/withdraw,
+-- POST /tx/submit.  Rows older than 24 hours are purged nightly by
+-- OracleRetentionService.purgeStaleIdempotencyKeys().
+
+CREATE TABLE idempotency_keys (
+  key           TEXT          NOT NULL,
+  endpoint      TEXT          NOT NULL,
+  response_body JSONB,
+  status_code   SMALLINT,
+  committed     BOOLEAN       NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (key, endpoint)
+);
+
+CREATE INDEX idx_idempotency_created_at
+  ON idempotency_keys (created_at);
