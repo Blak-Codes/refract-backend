@@ -423,6 +423,49 @@ describe("PolicyService", () => {
     it("deactivate is a no-op for an unknown id", () => {
       expect(() => service.deactivate("does-not-exist")).not.toThrow();
     });
+
+    it("findByHolder returns pagination metadata", async () => {
+      await service.buy(buildDto(holder));
+      const page = service.findByHolder(holder);
+      expect(page.total).toBe(1);
+      expect(page.page).toBe(1);
+      expect(page.totalPages).toBe(1);
+    });
+
+    it("findByHolder filters by isActive", async () => {
+      const { policy } = await service.buy(buildDto(holder));
+      service.deactivate(policy.id);
+
+      const active = service.findByHolder(holder, { page: 1, limit: 20, isActive: true, sortBy: "createdAt", sortDir: "desc" });
+      const inactive = service.findByHolder(holder, { page: 1, limit: 20, isActive: false, sortBy: "createdAt", sortDir: "desc" });
+
+      expect(active.total).toBe(0);
+      expect(inactive.total).toBe(1);
+    });
+
+    it("findByHolder filters by coverageType", async () => {
+      await service.buy(buildDto(holder, { coverageType: 0 }));
+      await service.buy(buildDto(holder, { coverageType: 0 }));
+      // coverageType 1 has a higher max, just use same amount — or reduce to 1000 USDC
+      const query1 = service.findByHolder(holder, { page: 1, limit: 20, coverageType: 1, sortBy: "createdAt", sortDir: "desc" });
+      const query0 = service.findByHolder(holder, { page: 1, limit: 20, coverageType: 0, sortBy: "createdAt", sortDir: "desc" });
+      expect(query1.total).toBe(0);
+      expect(query0.total).toBe(2);
+    });
+
+    it("findByHolder paginates correctly", async () => {
+      await service.buy(buildDto(holder, { coverageType: 0 }));
+      await service.buy(buildDto(holder, { coverageType: 0 }));
+      await service.buy(buildDto(holder, { coverageType: 0 }));
+
+      const page1 = service.findByHolder(holder, { page: 1, limit: 2, sortBy: "createdAt", sortDir: "desc" });
+      const page2 = service.findByHolder(holder, { page: 2, limit: 2, sortBy: "createdAt", sortDir: "desc" });
+
+      expect(page1.policies).toHaveLength(2);
+      expect(page1.total).toBe(3);
+      expect(page1.totalPages).toBe(2);
+      expect(page2.policies).toHaveLength(1);
+    });
   });
 
   describe("listTypes", () => {

@@ -288,16 +288,18 @@ describe("ClaimService", () => {
 
       await service.processTriggered();
 
-      const aliceHistory = service.getHistoryForHolder("GALICE");
-      expect(aliceHistory).toHaveLength(1);
-      expect(aliceHistory[0].policyId).toBe("policy-alice");
+      const page = service.getHistoryForHolder("GALICE");
+      expect(page.total).toBe(1);
+      expect(page.claims[0].policyId).toBe("policy-alice");
     });
 
-    it("returns an empty array for a holder with no settled claims", () => {
+    it("returns an empty page for a holder with no settled claims", () => {
       const { policyService, oracleService, claimSettlementService } = buildServices();
       const service = new ClaimService(policyService, oracleService, claimSettlementService);
 
-      expect(service.getHistoryForHolder("GNOBODY")).toEqual([]);
+      const page = service.getHistoryForHolder("GNOBODY");
+      expect(page.claims).toEqual([]);
+      expect(page.total).toBe(0);
     });
 
     it("excludes claims that were evaluated but didn't trigger", async () => {
@@ -309,7 +311,26 @@ describe("ClaimService", () => {
 
       await service.processTriggered();
 
-      expect(service.getHistoryForHolder("GALICE")).toEqual([]);
+      expect(service.getHistoryForHolder("GALICE").claims).toEqual([]);
+    });
+
+    it("paginates claim history", async () => {
+      const { policyService, oracleService, claimSettlementService } = buildServices();
+      const policies = Array.from({ length: 3 }, (_, i) =>
+        buildPolicy({ id: `policy-${i}`, holder: "GALICE", coverageType: 0 })
+      );
+      policyService.listActive.mockReturnValue(policies);
+      oracleService.checkStablecoinDepeg.mockResolvedValue(buildReading({ value: 0.9, threshold: 0.95 }));
+      const service = new ClaimService(policyService, oracleService, claimSettlementService);
+
+      await service.processTriggered();
+
+      const page1 = service.getHistoryForHolder("GALICE", { page: 1, limit: 2, sortDir: "desc" });
+      const page2 = service.getHistoryForHolder("GALICE", { page: 2, limit: 2, sortDir: "desc" });
+      expect(page1.claims).toHaveLength(2);
+      expect(page1.total).toBe(3);
+      expect(page1.totalPages).toBe(2);
+      expect(page2.claims).toHaveLength(1);
     });
   });
 
@@ -324,8 +345,8 @@ describe("ClaimService", () => {
 
       await service.processTriggered();
 
-      const recent = service.getRecentSettlements();
-      expect(recent.map((c) => c.policyId).sort()).toEqual(["policy-alice", "policy-bob"]);
+      const page = service.getRecentSettlements();
+      expect(page.claims.map((c) => c.policyId).sort()).toEqual(["policy-alice", "policy-bob"]);
     });
 
     it("caps results at the given limit", async () => {
@@ -339,14 +360,16 @@ describe("ClaimService", () => {
 
       await service.processTriggered();
 
-      expect(service.getRecentSettlements(2)).toHaveLength(2);
+      expect(service.getRecentSettlements({ page: 1, limit: 2, sortDir: "desc" }).claims).toHaveLength(2);
     });
 
-    it("returns an empty array when nothing has settled yet", () => {
+    it("returns an empty page when nothing has settled yet", () => {
       const { policyService, oracleService, claimSettlementService } = buildServices();
       const service = new ClaimService(policyService, oracleService, claimSettlementService);
 
-      expect(service.getRecentSettlements()).toEqual([]);
+      const page = service.getRecentSettlements();
+      expect(page.claims).toEqual([]);
+      expect(page.total).toBe(0);
     });
   });
 });

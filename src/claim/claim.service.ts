@@ -4,6 +4,15 @@ import { OracleService } from "../oracle/oracle.service";
 import { PolicyService, StoredPolicy } from "../policy/policy.service";
 import { ClaimSettlementService } from "./claim-settlement.service";
 import { ClaimResult } from "./claim-result";
+import { ListClaimsDto } from "./dto/list-claims.dto";
+
+export interface ClaimPage {
+  claims: ClaimResult[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
 
 const STALENESS_LIMIT_SECONDS = 1800; // 30 minutes — matches the old ClaimProcessor
 
@@ -169,13 +178,30 @@ export class ClaimService {
     };
   }
 
-  /** Settled claim history for a holder, most recent first. */
-  getHistoryForHolder(address: string): ClaimResult[] {
-    return this.history.filter((claim) => claim.holder === address).sort((a, b) => b.processedAt - a.processedAt);
+  /** Settled claim history for a holder, paginated and sorted by processedAt. */
+  getHistoryForHolder(address: string, query: ListClaimsDto = new ListClaimsDto()): ClaimPage {
+    const { page, limit, sortDir } = query;
+    const filtered = this.history.filter((c) => c.holder === address);
+    return this.paginateAndSort(filtered, page, limit, sortDir);
   }
 
   /** Most recent settled claims across all holders, for public "recent activity" displays. */
-  getRecentSettlements(limit = 10): ClaimResult[] {
-    return [...this.history].sort((a, b) => b.processedAt - a.processedAt).slice(0, limit);
+  getRecentSettlements(query: ListClaimsDto = { page: 1, limit: 10, sortDir: "desc" }): ClaimPage {
+    return this.paginateAndSort(this.history, query.page, query.limit, query.sortDir);
+  }
+
+  private paginateAndSort(
+    items: ClaimResult[],
+    page: number,
+    limit: number,
+    sortDir: "asc" | "desc"
+  ): ClaimPage {
+    const sorted = [...items].sort((a, b) =>
+      sortDir === "desc" ? b.processedAt - a.processedAt : a.processedAt - b.processedAt
+    );
+    const total = sorted.length;
+    const totalPages = Math.ceil(total / limit) || 1;
+    const offset = (page - 1) * limit;
+    return { claims: sorted.slice(offset, offset + limit), total, page, limit, totalPages };
   }
 }
