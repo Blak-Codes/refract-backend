@@ -12,6 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { DepositDto } from "./dto/deposit.dto";
+import { LpEvent, LpEventType } from "./lp-event";
 import { WithdrawDto } from "./dto/withdraw.dto";
 
 // Mock pool state — replaced by a Postgres-backed (pool_snapshots table)
@@ -50,6 +51,14 @@ export class PoolService {
   private readonly server: rpc.Server;
   private readonly networkPassphrase: string;
   private readonly poolContractId: string;
+
+  /**
+   * In-memory LP event ledger — append-only, same lifetime as the mock
+   * pool state above.  Replaced by a Postgres-backed INSERT into
+   * lp_position_events when the repository layer lands.
+   */
+  private readonly lpEvents: LpEvent[] = [];
+  private lpEventSeq = 0;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     const stellar = this.configService.get("stellar", { infer: true });
@@ -166,6 +175,11 @@ export class PoolService {
       nativeToScVal(amountBn, { type: "i128" }),
     ]);
 
+    // Append a pending deposit event to the ledger.  txHash and ledgerSeq
+    // are unknown until the caller signs and submits — they can be back-filled
+    // via a future recordLpEventConfirmed() once TxService is wired.
+    this.recordLpEvent(provider, "deposit", sharesOut.toString(), amount);
+
     return {
       provider,
       amountUsdc: amount,
@@ -209,6 +223,10 @@ export class PoolService {
       nativeToScVal(sharesBn, { type: "i128" }),
     ]);
 
+    // Append a pending withdrawal event — negative deltas for both shares
+    // and USDC so the ledger is reconstructible without additional context.
+    this.recordLpEvent(provider, "withdrawal", `-${shares}`, `-${usdcOut.toString()}`);
+
     return {
       provider,
       sharesIn: shares,
@@ -216,6 +234,55 @@ export class PoolService {
       sharePrice: mockPool.sharePrice,
       txXdr,
     };
+  }
+
+  /**
+   * Appends an event to the LP position event ledger for `provider`.
+   *
+   * Called internally by provide() and withdraw() after the Soroban tx XDR
+   * is prepared (the tx hash and ledger sequence are not yet known at this
+   * point — they are recorded once the caller submits and the tx confirms).
+   * A separate recordLpEventConfirmed() can be wired into TxService once
+   * the submission flow is Postgres-backed.
+   *
+   * When the Postgres repository lands, this method will INSERT into
+   * lp_position_events rather than appending to the in-memory array.
+   */
+  recordLpEvent(
+    provider: string,
+    eventType: LpEventType,
+    deltaShares: string,
+    deltaUsdc: string,
+    txHash: string | null = null,
+    ledgerSeq: number | null = null
+  ): LpEvent {
+    const event: LpEvent = {
+      id: ++this.lpEventSeq,
+      provider,
+      eventType,
+      deltaShares,
+      deltaUsdc,
+      txHash,
+      ledgerSeq,
+      recordedAt: new Date().toISOString(),
+    };
+    this.lpEvents.push(event);
+    return event;
+  }
+
+  /**
+   * Returns the full LP event history for `provider`, newest first.
+   *
+   * When the Postgres repository lands, this will become:
+   *   SELECT * FROM lp_position_events
+   *   WHERE provider = $1
+   *   ORDER BY recorded_at DESC
+   *   -- (with LIMIT/OFFSET for pagination)
+   */
+  getEventsForProvider(provider: string): LpEvent[] {
+    return this.lpEvents
+      .filter((e) => e.provider === provider)
+      .sort((a, b) => b.id - a.id);
   }
 
   getPremiumHistory(): PremiumHistoryEntry[] {

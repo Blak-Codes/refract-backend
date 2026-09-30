@@ -93,6 +93,38 @@ CREATE TABLE lp_positions (
   last_updated    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
+-- ─── LP Position Events (append-only ledger) ─────────────────────────────────
+--
+-- Every deposit or withdrawal appends a row here so LP balances are fully
+-- reconstructible and auditable.  lp_positions continues to store the
+-- current summary balance for fast reads; lp_position_events is the
+-- source of truth for history.
+--
+-- event_type  : 'deposit' | 'withdrawal' | 'premium_accrual'
+-- delta_shares: signed — positive for deposits/accruals, negative for withdrawals
+-- delta_usdc  : signed USDC amount in 1e7 base units corresponding to the event
+-- tx_hash     : on-chain transaction hash from the confirmed Soroban invocation
+-- ledger_seq  : Stellar ledger sequence at confirmation (NULL for off-chain events
+--               such as synthetic premium_accrual bookkeeping entries)
+
+CREATE TABLE lp_position_events (
+  id              BIGSERIAL       PRIMARY KEY,
+  provider        VARCHAR(56)     NOT NULL,
+  event_type      VARCHAR(20)     NOT NULL CHECK (event_type IN ('deposit', 'withdrawal', 'premium_accrual')),
+  delta_shares    NUMERIC(30, 0)  NOT NULL,
+  delta_usdc      NUMERIC(30, 0)  NOT NULL,
+  tx_hash         VARCHAR(64),
+  ledger_seq      BIGINT,
+  recorded_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT lp_position_events_provider_fk
+    FOREIGN KEY (provider) REFERENCES lp_positions(provider)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX idx_lp_events_provider ON lp_position_events(provider, recorded_at DESC);
+CREATE INDEX idx_lp_events_tx       ON lp_position_events(tx_hash) WHERE tx_hash IS NOT NULL;
+
 -- ─── Premium Revenue ─────────────────────────────────────────────────────────
 
 CREATE TABLE premium_revenue (
