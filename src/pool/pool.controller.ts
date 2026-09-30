@@ -12,13 +12,31 @@ export class PoolController {
     return this.poolService.getStats();
   }
 
+  /**
+   * Real on-chain read: consolidates the provider's share balance,
+   * premium entitlement, and lockup expiry into a single response so
+   * the frontend needs one call instead of two. A provider with no
+   * position yields an explicit zero-position (distinguishable from an
+   * error and from an unconfigured contract), matching the honest
+   * `null` semantics of `lockupExpiresAt`.
+   */
   @Get("user/:address")
-  getUserPosition(@Param("address") address: string) {
-    return this.poolService.getUserPosition(address);
+  async getUserPosition(@Param("address") address: string) {
+    const position = await this.poolService.getUserPosition(address);
+    return {
+      address: position.address,
+      shares: position.shares.toString(),
+      usdcValue: position.usdcValue.toString(),
+      premiumEarned: position.premiumEarned.toString(),
+      pct: position.pct,
+      lockupExpiresAt:
+        position.lockupExpiresAt !== null ? position.lockupExpiresAt.toString() : null,
+      readAt: position.readAt,
+    };
   }
 
   /**
-   * Real on-chain read (unlike stats/user, still mocked pending the
+   * Real on-chain read (unlike stats, still mocked pending the
    * Postgres wiring) — lets the frontend show a withdrawal lockup
    * countdown before the caller ever attempts to submit one.
    */
