@@ -6,12 +6,14 @@ import { ThrottlerModule, ThrottlerGuard } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
 import configuration from "./config/configuration";
 import { CacheModule } from "./cache/cache.module";
+import { ClaimModule } from "./claim/claim.module";
+import { DbModule } from "./db/db.module";
 import { HealthModule } from "./health/health.module";
-import { QuoteModule } from "./quote/quote.module";
+import { OracleModule } from "./oracle/oracle.module";
 import { PolicyModule } from "./policy/policy.module";
 import { PoolModule } from "./pool/pool.module";
-import { OracleModule } from "./oracle/oracle.module";
-import { ClaimModule } from "./claim/claim.module";
+import { QuoteModule } from "./quote/quote.module";
+import { StellarModule } from "./stellar/stellar.module";
 import { TxModule } from "./tx/tx.module";
 import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
@@ -63,14 +65,7 @@ import configuration, { AppConfig } from "./config/configuration";
     ScheduleModule.forRoot(),
     // CacheModule is @Global — imported once here, available everywhere.
     CacheModule,
-    HealthModule,
-    AuthModule,
-    QuoteModule,
-    PolicyModule,
-    PoolModule,
-    OracleModule,
-    ClaimModule,
-    TxModule,
+    StellarModule,
     HealthModule,
   ],
   providers: [
@@ -82,6 +77,27 @@ import configuration, { AppConfig } from "./config/configuration";
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
     },
+  ],
+    HealthModule,
+    AuthModule,
+    QuoteModule,
+    PolicyModule,
+    PoolModule,
+    OracleModule,
+    ClaimModule,
+    TxModule,
+    DbModule,
+    // CacheModule is @Global — imported once here, available everywhere.
+    CacheModule,
+    HealthModule,
+    AuthModule,
+    QuoteModule,
+    PolicyModule,
+    PoolModule,
+    OracleModule,
+    ClaimModule,
+    TxModule,
+    StellarModule,
   ],
 })
 export class AppModule {}
