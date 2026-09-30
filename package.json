@@ -9,7 +9,8 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.ts\"",
-    "test": "jest"
+    "test": "jest",
+    "test:integration": "jest --config test/integration/jest.integration.config.ts --runInBand"
   },
   "jest": {
     "preset": "ts-jest",
