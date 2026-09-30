@@ -2,7 +2,8 @@ import "reflect-metadata";
 import helmet from "helmet";
 import { NestFactory } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
-import { ValidationPipe, VersioningType, RequestMethod } from "@nestjs/common";
+import { ClassSerializerInterceptor, ValidationPipe, VersioningType, RequestMethod } from "@nestjs/common";
+import { Reflector } from "@nestjs/core";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
@@ -67,6 +68,16 @@ async function bootstrap() {
     type: VersioningType.URI,
     defaultVersion: "1",
   });
+
+  // Response DTOs govern what leaves the API: with `excludeAll`, only fields
+  // explicitly decorated with `@Expose()` are serialized, so a new internal
+  // field is invisible by default and must be deliberately exposed.
+  app.useGlobalInterceptors(
+    new ClassSerializerInterceptor(app.get(Reflector), {
+      strategy: "excludeAll",
+      excludeExtraneousValues: true,
+    })
+  );
   // Use the plain `ws` protocol adapter (not Nest's default socket.io) so
   // the WebSocket wire format stays identical to the old raw `ws` server —
   // any client already speaking to the oracle feed keeps working unchanged.
