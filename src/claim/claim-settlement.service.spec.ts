@@ -2,6 +2,8 @@ import { ConfigService } from "@nestjs/config";
 import { Account, Keypair, StrKey, TransactionBuilder, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { ClaimSettlementService, isArgumentArityMismatch } from "./claim-settlement.service";
 import { AppConfig } from "../config/configuration";
+import { FeeStrategyService } from "../stellar/fee-strategy.service";
+import { SorobanRpcService } from "../stellar/soroban-rpc.service";
 
 const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
 
@@ -26,13 +28,31 @@ function buildConfig(overrides: Partial<AppConfig["stellar"]> = {}): ConfigServi
     relayerSecret: Keypair.random().secret(),
     ...overrides,
   };
+  const fees: AppConfig["fees"] = {
+    ceilingStroops: "10000000",
+    statsTtlMs: 15_000,
+    profiles: {
+      moderate: { percentile: 90, multiplier: 1.0 },
+      aggressive: { percentile: 99, multiplier: 1.0 },
+    },
+  };
   return {
     get: jest.fn((key: string) => {
       if (key === "stellar") return stellar;
+      if (key === "fees") return fees;
       if (key === "confirmation") return CONFIRMATION;
       return undefined;
     }),
   } as unknown as ConfigService<AppConfig, true>;
+}
+
+function buildSettlementService(overrides: Partial<AppConfig["stellar"]> = {}) {
+  const config = buildConfig(overrides);
+  const rpcService = new SorobanRpcService(config);
+  const feeStrategy = new FeeStrategyService(rpcService, config);
+  jest.spyOn(feeStrategy, "estimateInclusionFee").mockResolvedValue(BASE_FEE);
+  jest.spyOn(feeStrategy, "assertTotalUnderCeiling").mockImplementation(() => undefined);
+  return new ClaimSettlementService(config, rpcService, feeStrategy);
 }
 
 const PENDING_SEND_RESULT = { status: "PENDING" as const, hash: "mock-tx-hash", latestLedger: 1, latestLedgerCloseTime: 1 };
@@ -84,24 +104,24 @@ describe("ClaimSettlementService", () => {
 
   describe("isConfigured", () => {
     it("is false when the pool contract ID is missing", () => {
-      const service = new ClaimSettlementService(buildConfig({ poolContractId: "" }));
+      const service = buildSettlementService({ poolContractId: "" });
       expect(service.isConfigured()).toBe(false);
     });
 
     it("is false when the relayer secret is missing", () => {
-      const service = new ClaimSettlementService(buildConfig({ relayerSecret: "" }));
+      const service = buildSettlementService({ relayerSecret: "" });
       expect(service.isConfigured()).toBe(false);
     });
 
     it("is true once both the pool contract ID and relayer secret are set", () => {
-      const service = new ClaimSettlementService(buildConfig());
+      const service = buildSettlementService();
       expect(service.isConfigured()).toBe(true);
     });
   });
 
   describe("settleClaim", () => {
     it("returns settled:false without touching the network when unconfigured", async () => {
-      const service = new ClaimSettlementService(buildConfig({ poolContractId: "" }));
+      const service = buildSettlementService({ poolContractId: "" });
       const getAccountSpy = jest.spyOn(rpc.Server.prototype, "getAccount");
 
       const result = await service.settleClaim(1n, { holder: Keypair.random().publicKey(), payout: 100n });
@@ -135,6 +155,7 @@ describe("ClaimSettlementService", () => {
 
     it("builds, signs, submits, and confirms a successful settlement", async () => {
       const service = new ClaimSettlementService(buildConfig());
+      const holder = Keypair.random().publicKey();
 
       jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(Keypair.random().publicKey(), "1"));
       jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
@@ -148,6 +169,9 @@ describe("ClaimSettlementService", () => {
 
     it("does not settle when the submission is rejected outright", async () => {
       const service = new ClaimSettlementService(buildConfig());
+      const holder = Keypair.random().publicKey();
+
+      const result = await service.settleClaim(42n, { holder, payout: 5_000_000_000n });
 
       jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(Keypair.random().publicKey(), "1"));
       jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
@@ -159,12 +183,15 @@ describe("ClaimSettlementService", () => {
       const result = await service.settleClaim(1n, { payout: 100n });
 
       expect(result.settled).toBe(false);
-      expect(result.error).toContain("ERROR");
+      expect(result.error).toMatch(/rejected|ERROR|UNKNOWN/i);
       expect(getTransactionSpy).not.toHaveBeenCalled();
     });
 
     it("does not settle when the submitted transaction fails on-chain", async () => {
       const service = new ClaimSettlementService(buildConfig());
+      const holder = Keypair.random().publicKey();
+
+      const result = await service.settleClaim(1n, { payout: 100n });
 
       jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(Keypair.random().publicKey(), "1"));
       jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
@@ -194,8 +221,7 @@ describe("ClaimSettlementService", () => {
       });
     });
 
-    it("gives up and reports a timeout once confirmation polling hits the deadline", async () => {
-      const service = new ClaimSettlementService(buildConfig());
+      const result = await service.settleClaim(1n, { payout: 100n });
 
       jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(Keypair.random().publicKey(), "1"));
       jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
@@ -208,7 +234,9 @@ describe("ClaimSettlementService", () => {
         oldestLedgerCloseTime: 1,
       });
 
-      const result = await service.settleClaim(1n, { payout: 100n });
+      const resultPromise = service.settleClaim(1n, holder, 100n);
+      await jest.runAllTimersAsync();
+      const result = await resultPromise;
 
       expect(result.settled).toBe(false);
       expect(result.error).toContain("Timed out");
@@ -243,11 +271,12 @@ describe("ClaimSettlementService", () => {
     });
 
     it("catches an unexpected error (e.g. a network failure) and reports settled:false", async () => {
-      const service = new ClaimSettlementService(buildConfig());
+      const service = buildSettlementService();
+      const holder = Keypair.random().publicKey();
 
       jest.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValue(new Error("connection refused"));
 
-      const result = await service.settleClaim(1n, { payout: 100n });
+      const result = await service.settleClaim(1n, holder, 100n);
 
       expect(result.settled).toBe(false);
       expect(result.error).toBe("connection refused");

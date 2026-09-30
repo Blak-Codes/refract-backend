@@ -1,7 +1,7 @@
 {
   "name": "refract-protocol-backend",
   "version": "0.1.0",
-  "description": "Refract Protocol backend — oracle monitoring, claim processing, premium quoting",
+  "description": "Refract Protocol backend \u2014 oracle monitoring, claim processing, premium quoting",
   "main": "dist/main.js",
   "scripts": {
     "dev": "nodemon --exec ts-node src/main.ts",
@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "jest",
+    "regenerate:xdr-fixtures": "ts-node scripts/regenerate-xdr-fixtures.ts",
     "test:integration": "jest --config test/integration/jest.integration.config.ts --runInBand"
   },
   "jest": {

@@ -2,7 +2,10 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { BASE_FEE, Contract, Keypair, TransactionBuilder, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
-import { pollForConfirmation } from "../stellar/soroban-confirmation.util";
+import { FeeCeilingExceededError, FeeStrategyService } from "../stellar/fee-strategy.service";
+import { encodeProcessClaimArg } from "../stellar/scval-encoders";
+import { SorobanRpcService } from "../stellar/soroban-rpc.service";
+import { submitAndConfirm } from "../stellar/transaction-submitter";
 
 export interface SettlementResult {
   settled: boolean;
@@ -41,19 +44,27 @@ export interface SettlementAudit {
 @Injectable()
 export class ClaimSettlementService {
   private readonly logger = new Logger(ClaimSettlementService.name);
-  private readonly server: rpc.Server;
-  private readonly networkPassphrase: string;
   private readonly poolContractId: string;
   private readonly relayerKeypair: Keypair | null;
   private readonly confirmationDefaults: AppConfig["confirmation"];
 
-  constructor(private readonly configService: ConfigService<AppConfig, true>) {
+  constructor(
+    private readonly configService: ConfigService<AppConfig, true>,
+    private readonly rpcService: SorobanRpcService,
+    private readonly feeStrategy: FeeStrategyService
+  ) {
     const stellar = this.configService.get("stellar", { infer: true });
-    this.server = new rpc.Server(stellar.sorobanRpcUrl);
-    this.networkPassphrase = stellar.networkPassphrase;
     this.poolContractId = stellar.poolContractId;
     this.relayerKeypair = stellar.relayerSecret ? Keypair.fromSecret(stellar.relayerSecret) : null;
     this.confirmationDefaults = this.configService.get("confirmation", { infer: true });
+  }
+
+  private get server(): rpc.Server {
+    return this.rpcService.server;
+  }
+
+  private get networkPassphrase(): string {
+    return this.rpcService.networkPassphrase;
   }
 
   /** True once a pool contract ID and relayer secret are configured. */
@@ -80,6 +91,7 @@ export class ClaimSettlementService {
         : "";
 
     try {
+      const inclusionFee = await this.feeStrategy.estimateInclusionFee("aggressive");
       const sourceAccount = await this.server.getAccount(this.relayerKeypair.publicKey());
       const contract = new Contract(this.poolContractId);
 
@@ -88,7 +100,7 @@ export class ClaimSettlementService {
       const operation = contract.call("process_claim", nativeToScVal(onChainPolicyId, { type: "u64" }));
 
       const builtTx = new TransactionBuilder(sourceAccount, {
-        fee: BASE_FEE,
+        fee: inclusionFee,
         networkPassphrase: this.networkPassphrase,
       })
         .addOperation(operation)
@@ -99,12 +111,19 @@ export class ClaimSettlementService {
       // fees/footprint — argument/arity mismatches surface here as a
       // permanent code-level bug (distinct from transient RPC failures).
       const preparedTx = await this.server.prepareTransaction(builtTx);
+      const preparedFee = (preparedTx as { fee?: string }).fee;
+      this.feeStrategy.assertTotalUnderCeiling(
+        inclusionFee,
+        preparedFee ? BigInt(preparedFee) - BigInt(inclusionFee) : 0n
+      );
+
       preparedTx.sign(this.relayerKeypair);
 
-      const sendResult = await this.server.sendTransaction(preparedTx);
-      if (sendResult.status === "ERROR" || sendResult.status === "TRY_AGAIN_LATER") {
-        return { settled: false, error: `Submission not accepted: ${sendResult.status}` };
-      }
+      // Validity window matches setTimeout(30). TRY_AGAIN_LATER retries reuse
+      // this identical signed envelope — never rebuild inside the submitter.
+      const confirmation = await submitAndConfirm(this.server, preparedTx, {
+        validityWindowMs: 30_000,
+      });
 
       const confirmation = await pollForConfirmation(this.server, sendResult.hash, {
         initialIntervalMs: this.confirmationDefaults.initialIntervalMs,
@@ -128,8 +147,13 @@ export class ClaimSettlementService {
         // Deadline exceeded is indeterminate — caller may retry. On-chain
         // failure is definite; still leave retry policy to ClaimService.
         permanent: confirmation.outcome === "failed_on_chain",
+        resultCode: confirmation.resultCode,
       };
     } catch (err) {
+      if (err instanceof FeeCeilingExceededError) {
+        this.logger.error(`Settlement fee ceiling exceeded for policy ${onChainPolicyId}: ${err.message}`);
+        return { settled: false, error: err.message, resultCode: "txINSUFFICIENT_FEE" };
+      }
       const message = err instanceof Error ? err.message : String(err);
       if (isArgumentArityMismatch(message)) {
         // Greppable permanent marker — do not treat as a transient RPC blip.
