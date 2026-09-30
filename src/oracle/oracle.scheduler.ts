@@ -22,7 +22,11 @@ export class OracleScheduler {
   @Interval(60_000)
   async pollOracles(): Promise<void> {
     try {
-      const readings = await this.oracleService.checkAll();
+      // checkAllFresh() bypasses the Redis cache so the scheduler always
+      // broadcasts the latest upstream data, and proactively refreshes the
+      // cache key so subsequent HTTP /oracle/status calls within the same
+      // cycle are served from Redis rather than issuing duplicate API calls.
+      const readings = await this.oracleService.checkAllFresh();
       for (const reading of readings) {
         if (reading.severity !== "low") {
           this.oracleGateway.broadcastAlert(reading);
