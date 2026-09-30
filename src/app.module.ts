@@ -19,6 +19,7 @@ import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
 import { ApiKeyGuard } from "./auth/api-key.guard";
 import configuration, { AppConfig } from "./config/configuration";
+import { StellarModule } from "./stellar/stellar.module";
 
 @Module({
   imports: [

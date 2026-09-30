@@ -3,9 +3,6 @@ import { Account, Keypair, StrKey, TransactionBuilder, nativeToScVal, rpc, scVal
 import { ClaimSettlementService, isArgumentArityMismatch } from "./claim-settlement.service";
 import { AppConfig } from "../config/configuration";
 import { ConfigService } from "@nestjs/config";
-import { Account, Keypair, StrKey, TransactionBuilder, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { ClaimSettlementService, isArgumentArityMismatch } from "./claim-settlement.service";
-import { AppConfig } from "../config/configuration";
 import { testStellarConfig } from "../config/test-stellar";
 import { RelayerAccountService } from "../stellar/relayer-account.service";
 import { StellarConfigValidator } from "../stellar/stellar-config.validator";
@@ -31,22 +28,12 @@ function buildConfig(overrides: Partial<AppConfig["stellar"]> = {}): ConfigServi
     networkPassphrase: NETWORK_PASSPHRASE,
     poolContractId: StrKey.encodeContract(Buffer.alloc(32, 1)),
     relayerSecret: Keypair.random().secret(),
-    ...overrides,
-  };
-  const fees: AppConfig["fees"] = {
-    ceilingStroops: "10000000",
-    statsTtlMs: 15_000,
-    profiles: {
-      moderate: { percentile: 90, multiplier: 1.0 },
-      aggressive: { percentile: 99, multiplier: 1.0 },
-    },
-  };
-  return {
-    get: jest.fn().mockReturnValue(stellar),
-  } as unknown as ConfigService<AppConfig, true>;
-}
-    poolContractId: StrKey.encodeContract(Buffer.alloc(32, 1)),
-    relayerSecret: Keypair.random().secret(),
+    rpcTimeoutMs: 10000,
+    rpcMaxRetries: 3,
+    restoreFeeCeiling: "5000000",
+    restoreMaxAttemptsPerPolicy: 3,
+    ttlExtensionLedgers: 17280,
+    proactiveTtlExtendWithinDays: 30,
     ...overrides,
   };
   const fees: AppConfig["fees"] = {
@@ -65,6 +52,12 @@ function buildConfig(overrides: Partial<AppConfig["stellar"]> = {}): ConfigServi
       return undefined;
     }),
   } as unknown as ConfigService<AppConfig, true>;
+}
+
+function createService(overrides: Partial<AppConfig["stellar"]> = {}): ClaimSettlementService {
+  const config = buildConfig(overrides);
+  const rpcSvc = new SorobanRpcService(config);
+  return new ClaimSettlementService(config, rpcSvc);
 }
 
 function buildSettlementService(overrides: Partial<AppConfig["stellar"]> = {}) {
@@ -143,6 +136,24 @@ describe("isArgumentArityMismatch", () => {
   });
 });
 
+function successTxResponse(returnValue?: ReturnType<typeof nativeToScVal>) {
+  return {
+    status: rpc.Api.GetTransactionStatus.SUCCESS,
+    latestLedger: 2,
+    latestLedgerCloseTime: 2,
+    oldestLedger: 1,
+    oldestLedgerCloseTime: 1,
+    ledger: 2,
+    createdAt: 2,
+    applicationOrder: 1,
+    feeBump: false,
+    envelopeXdr: {} as never,
+    resultXdr: {} as never,
+    resultMetaXdr: {} as never,
+    ...(returnValue !== undefined ? { returnValue } : {}),
+  };
+}
+
 describe("ClaimSettlementService", () => {
   afterEach(() => {
     jest.restoreAllMocks();
@@ -178,19 +189,87 @@ describe("ClaimSettlementService", () => {
       const relayer = mockRelayer(true);
       const service = new ClaimSettlementService(buildConfig({ poolContractId: "" }), relayer, mockValidator(false));
 
-      const result = await service.settleClaim(1n, { holder: Keypair.random().publicKey(), payout: 100n });
+    it("builds, signs, submits, and confirms a successful settlement", async () => {
+      const service = createService();
+      const holder = Keypair.random().publicKey();
+      const payout = 5_000_000_000n;
 
-      expect(result.settled).toBe(false);
+      jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(holder, "1"));
+      jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
+      jest.spyOn(rpc.Server.prototype, "sendTransaction").mockResolvedValue(PENDING_SEND_RESULT);
+      jest.spyOn(rpc.Server.prototype, "getTransaction").mockResolvedValue(
+        successTxResponse(nativeToScVal(payout, { type: "i128" }))
+      );
 
+      const result = await service.settleClaim("policy-1", holder, payout);
 
-      expect(result).toEqual({ settled: true, txHash: "mock-tx-hash" });
-      expect(relayer.submitRelayerTransaction).toHaveBeenCalled();
+      expect(result).toEqual({ settled: true, txHash: "mock-tx-hash", actualPayout: payout });
     });
 
-    it("does not settle when confirmation reports on-chain failure", async () => {
-      const relayer = mockRelayer(true);
-      (relayer.submitRelayerTransaction as jest.Mock).mockResolvedValue({ hash: "mock-tx-hash" });
-      const service = new ClaimSettlementService(buildConfig(), relayer, mockValidator(true));
+    it("decodes large i128 actualPayout values", async () => {
+      const service = createService();
+      const holder = Keypair.random().publicKey();
+      const payout = 9_007_199_254_740_993n;
+
+      jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(holder, "1"));
+      jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
+      jest.spyOn(rpc.Server.prototype, "sendTransaction").mockResolvedValue(PENDING_SEND_RESULT);
+      jest.spyOn(rpc.Server.prototype, "getTransaction").mockResolvedValue(
+        successTxResponse(nativeToScVal(payout, { type: "i128" }))
+      );
+
+      const result = await service.settleClaim("policy-1", holder, payout);
+
+      expect(result.settled).toBe(true);
+      expect(result.actualPayout).toBe(payout);
+    });
+
+    it("settles with null actualPayout when returnValue is omitted", async () => {
+      const service = createService();
+      const holder = Keypair.random().publicKey();
+
+      jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(holder, "1"));
+      jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
+      jest.spyOn(rpc.Server.prototype, "sendTransaction").mockResolvedValue(PENDING_SEND_RESULT);
+      jest.spyOn(rpc.Server.prototype, "getTransaction").mockResolvedValue(successTxResponse());
+
+      const result = await service.settleClaim("policy-1", holder, 100n);
+
+      expect(result).toEqual({ settled: true, txHash: "mock-tx-hash", actualPayout: null });
+    });
+
+    it("maps PoolError-style return values to actionable errors", async () => {
+      const service = createService();
+      const holder = Keypair.random().publicKey();
+      const errReturn = xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("error"),
+          val: xdr.ScVal.scvU32(6),
+        }),
+      ]);
+
+      jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(holder, "1"));
+      jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
+      jest.spyOn(rpc.Server.prototype, "sendTransaction").mockResolvedValue(PENDING_SEND_RESULT);
+      jest.spyOn(rpc.Server.prototype, "getTransaction").mockResolvedValue(successTxResponse(errReturn));
+
+      const result = await service.settleClaim("policy-1", holder, 100n);
+
+      expect(result.settled).toBe(false);
+      expect(result.error).toContain("PolicyNotFound");
+    });
+
+    it("does not settle when the submission is rejected outright", async () => {
+      const service = createService();
+      const holder = Keypair.random().publicKey();
+
+      const result = await service.settleClaim(42n, { holder, payout: 5_000_000_000n });
+
+      jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(Keypair.random().publicKey(), "1"));
+      jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(async (tx) => tx as never);
+      jest
+        .spyOn(rpc.Server.prototype, "sendTransaction")
+        .mockResolvedValue({ status: "ERROR", hash: "mock-tx-h
       const holder = Keypair.random().publicKey();
 
       const result = await service.settleClaim(42n, { holder, payout: 5_000_000_000n });
@@ -210,7 +289,7 @@ describe("ClaimSettlementService", () => {
     });
 
     it("does not settle when the submitted transaction fails on-chain", async () => {
-      const service = new ClaimSettlementService(buildConfig());
+      const service = createService();
       const holder = Keypair.random().publicKey();
 
       const result = await service.settleClaim(1n, { payout: 100n });
@@ -346,6 +425,12 @@ describe("ClaimSettlementService", () => {
 
       expect(result.settled).toBe(false);
       expect(result.error).toBe("connection refused");
+    });
+  });
+
+  describe("decodePoolErrorMessage", () => {
+    it("maps numeric PoolError codes", () => {
+      expect(decodePoolErrorMessage("error code: 6")).toContain("PolicyNotFound");
     });
   });
 });
