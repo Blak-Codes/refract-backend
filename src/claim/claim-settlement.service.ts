@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, OnApplicationShutdown } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { BASE_FEE, Contract, Keypair, TransactionBuilder, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
@@ -42,11 +42,20 @@ export interface SettlementAudit {
  * only cares that settlement confirms.
  */
 @Injectable()
-export class ClaimSettlementService {
+export class ClaimSettlementService implements OnApplicationShutdown {
   private readonly logger = new Logger(ClaimSettlementService.name);
   private readonly poolContractId: string;
   private readonly relayerKeypair: Keypair | null;
   private readonly confirmationDefaults: AppConfig["confirmation"];
+
+  /**
+   * In-flight settlements keyed by the submitted transaction hash. A
+   * settlement is added immediately after sendTransaction() accepts the
+   * transaction and removed once it is confirmed (or has failed). Shutdown
+   * waits on these so a payout that already moved on-chain is never lost
+   * without a record.
+   */
+  private readonly inFlight = new Map<string, Promise<SettlementResult>>();
 
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
@@ -140,15 +149,26 @@ export class ClaimSettlementService {
         return { settled: true, txHash: confirmation.txHash };
       }
 
-      return {
-        settled: false,
-        txHash: confirmation.txHash,
-        error: confirmation.error,
-        // Deadline exceeded is indeterminate — caller may retry. On-chain
-        // failure is definite; still leave retry policy to ClaimService.
-        permanent: confirmation.outcome === "failed_on_chain",
-        resultCode: confirmation.resultCode,
-      };
+      // The transaction is now submitted on-chain and cannot be cancelled.
+      // Track it so shutdown waits for confirmation (or records the hash).
+      const confirmationPromise = pollForConfirmation(this.server, sendResult.hash).then(
+        (confirmation) => ({
+          settled: confirmation.confirmed,
+          txHash: confirmation.txHash,
+          error: confirmation.error,
+          // Deadline exceeded is indeterminate — caller may retry. On-chain
+          // failure is definite; still leave retry policy to ClaimService.
+          permanent: confirmation.outcome === "failed_on_chain",
+          resultCode: confirmation.resultCode,
+        })
+      );
+      this.inFlight.set(sendResult.hash, confirmationPromise);
+
+      try {
+        return await confirmationPromise;
+      } finally {
+        this.inFlight.delete(sendResult.hash);
+      }
     } catch (err) {
       if (err instanceof FeeCeilingExceededError) {
         this.logger.error(`Settlement fee ceiling exceeded for policy ${onChainPolicyId}: ${err.message}`);
